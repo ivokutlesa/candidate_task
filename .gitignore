@@ -1,2 +1,9 @@
-.vscode
-/build
+build/
+**/bin/
+**/obj/
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+.DS_Store
