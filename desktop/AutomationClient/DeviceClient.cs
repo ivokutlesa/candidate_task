@@ -5,6 +5,7 @@ namespace AutomationClient;
 
 public sealed class DeviceClient
 {
+    private static readonly TimeSpan ReconnectDelay = TimeSpan.FromMilliseconds(500);
     private readonly string _host;
     private readonly int _port;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
@@ -31,49 +32,119 @@ public sealed class DeviceClient
         // TODO (candidate): A simulated cable pull, server restart, or an
         // initial unavailable server currently ends this method. Add bounded
         // retry/backoff and reconnect while preserving clean cancellation.
-        try
+        while (!token.IsCancellationRequested)
         {
-            using var client = new TcpClient();
-            await client.ConnectAsync(_host, _port, token);
-            Console.WriteLine("Connected to virtual controller.");
-            using NetworkStream stream = client.GetStream();
-            using var reader = new StreamReader(stream, Encoding.ASCII, false, 1024, leaveOpen: true);
-            using var writer = new StreamWriter(stream, Encoding.ASCII, 1024, leaveOpen: true)
-            {
-                AutoFlush = true,
-                NewLine = "\n"
-            };
-            using var session = CancellationTokenSource.CreateLinkedTokenSource(token);
-            _writer = writer;
-            Task heartbeat = HeartbeatLoopAsync(session.Token);
             try
             {
-                while (!token.IsCancellationRequested)
-                {
-                    string? line = await reader.ReadLineAsync(token);
-                    if (line is null) break;
-                    if (Protocol.TryParseStatus(line, out DeviceStatus? status) && status is not null)
-                    {
-                        StatusReceived?.Invoke(status);
-                    }
-                    else if (!line.StartsWith("PONG") && !line.StartsWith("ACK,"))
-                    {
-                        Console.WriteLine("Device message (or invalid telemetry): " + line);
-                    }
-                }
+                await RunSessionAsync(token);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+            catch (IOException ex) 
+            { 
+                Console.WriteLine("Disconnected: " + ex.Message); 
+            }
+            catch (SocketException ex) 
+            { 
+                Console.WriteLine("Connection failed: " + ex.Message); 
             }
             finally
             {
-                session.Cancel();
-                _writer = null;
-                try { await heartbeat; }
-                catch (OperationCanceledException) { }
+                Console.WriteLine("Device session ended.");
+            }
+
+            if (token.IsCancellationRequested) 
+                break;
+
+            try 
+            { 
+                await Task.Delay(ReconnectDelay, token); 
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) 
+            { 
+                break; 
             }
         }
-        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
-        catch (IOException ex) { Console.WriteLine("Disconnected: " + ex.Message); }
-        catch (SocketException ex) { Console.WriteLine("Connection failed: " + ex.Message); }
-        Console.WriteLine("Device session ended.");
+    }
+
+    private async Task RunSessionAsync(CancellationToken token)
+    {
+        using var client = new TcpClient();
+        await client.ConnectAsync(_host, _port, token);
+        Console.WriteLine("Connected to virtual controller.");
+        using NetworkStream stream = client.GetStream();
+        using var reader = new StreamReader(stream, Encoding.ASCII, false, 1024, leaveOpen: true);
+        using var writer = new StreamWriter(stream, Encoding.ASCII, 1024, leaveOpen: true)
+        {
+            AutoFlush = true,
+            NewLine = "\n"
+        };
+        using var session = CancellationTokenSource.CreateLinkedTokenSource(token);
+
+        Task? heartbeat = null;
+        try
+        {
+            await SetWriterAsync(writer, token);
+            heartbeat = HeartbeatLoopAsync(session.Token);
+
+            while (!token.IsCancellationRequested)
+            {
+                string? line = await reader.ReadLineAsync(token);
+                if (line is null) 
+                {
+                    break;
+                }
+                if (Protocol.TryParseStatus(line, out DeviceStatus? status) && status is not null)
+                {
+                    StatusReceived?.Invoke(status);
+                }
+                else if (!line.StartsWith("PONG") && !line.StartsWith("ACK,"))
+                {
+                    Console.WriteLine("Device message (or invalid telemetry): " + line);
+                }
+            }
+        }
+        finally
+        {
+            session.Cancel();
+            await ClearWriterAsync(writer);
+            if (heartbeat is not null)
+            {
+                try 
+                { 
+                    await heartbeat; 
+                }
+                catch (OperationCanceledException) when (session.IsCancellationRequested) { }
+            }
+        }
+    }
+
+    private async Task SetWriterAsync(StreamWriter writer, CancellationToken token)
+    {
+        await _writeLock.WaitAsync(token);
+        try 
+        { 
+            _writer = writer; 
+        }
+        finally 
+        { 
+            _writeLock.Release(); 
+        }
+    }
+
+    private async Task ClearWriterAsync(StreamWriter writer)
+    {
+        await _writeLock.WaitAsync();
+        try
+        {
+            if (ReferenceEquals(_writer, writer)) 
+            {
+                _writer = null;
+            }
+        }
+        finally 
+        { 
+            _writeLock.Release(); 
+        }
     }
 
     private async Task HeartbeatLoopAsync(CancellationToken token)
