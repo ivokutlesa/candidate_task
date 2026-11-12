@@ -148,6 +148,30 @@ static void timeout_recovery_resumes_from_off() {
     expect(c.Snapshot().fault == "OK", "Fresh heartbeat restores OK");
 }
 
+static void latest_heartbeat_refreshes_watchdog() {
+    Controller c;
+    c.SetTemperature(70.0);
+    c.OnHeartbeat(100);
+    c.OnHeartbeat(1000);
+
+    c.Tick(2500);  // Exactly 1500 ms after the latest heartbeat.
+    auto s = c.Snapshot();
+
+    expect(s.fan_on, "Latest heartbeat must refresh the watchdog");
+    expect(s.fault == "OK", "Controller must remain healthy");
+}
+
+static void normal_fan_on_reports_ok() {
+    Controller c;
+    c.OnHeartbeat(100);
+    c.SetTemperature(60.0);
+    c.Tick(100);
+
+    auto s = c.Snapshot();
+    expect(s.fan_on, "Fan must turn ON at 60 C");
+    expect(s.fault == "OK", "Normal operation must report OK");
+}
+
 int main() {
     std::vector<std::pair<std::string, TestFn>> tests = {
         {"initial_state_is_safe", initial_state_is_safe},

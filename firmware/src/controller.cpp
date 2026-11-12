@@ -26,9 +26,25 @@ void Controller::Tick(std::uint64_t monotonic_ms) {
     //   - After a forced OFF ends, control resumes from fan OFF: the fan only
     //     turns ON again once the temperature is >=60.0 C.
     //   - Use monotonic_ms rather than sleeping or wall-clock timestamps.
-    (void)monotonic_ms;
-    fan_on_ = temperature_c_ >= 60.0;
-    fault_ = "OK";
+
+    if (interlock_active_) {
+        fan_on_ = false;
+        fault_ = "INTERLOCK";
+    } else if (!heartbeat_seen_ || (monotonic_ms - last_heartbeat_ms_ > 1500)) {
+        fan_on_ = false;
+        fault_ = "COMM_TIMEOUT";
+    } else {
+        fault_ = "OK";
+        if (fan_on_) {
+            if (temperature_c_ <= 55.0) {
+                fan_on_ = false;
+            }
+        } else {
+            if (temperature_c_ >= 60.0) {
+                fan_on_ = true;
+            }
+        }
+    }
 }
 
 ControllerStatus Controller::Snapshot() const {
