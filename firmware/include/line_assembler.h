@@ -21,8 +21,46 @@ public:
     // See CANDIDATE_TASK.md Part B for the exact rules.
     template <std::size_t N>
     LineResult Poll(RingBuffer<N>& rx) {
-        // TODO (candidate)
-        (void)rx;
+        if (reset_on_poll_) {
+            length_ = 0;
+            line_[0] = '\0';
+            reset_on_poll_ = false;
+        }
+
+        std::uint8_t byte = 0;
+        while (rx.Pop(byte)) {
+            const char ch = static_cast<char>(byte);
+
+            if (discarding_) {
+                if (ch == '\n') {
+                    discarding_ = false;
+                    pending_cr_ = false;
+                    length_ = 0;
+                    line_[0] = '\0';
+                    return LineResult::TooLong;
+                }
+                continue;
+            }
+
+            if (ch == '\n') {
+                pending_cr_ = false;
+                line_[length_] = '\0';
+                reset_on_poll_ = true;
+                return LineResult::Line;
+            }
+
+            if (pending_cr_) {
+                pending_cr_ = false;
+                if (!Append('\r')) continue;
+            }
+
+            if (ch == '\r') {
+                pending_cr_ = true;
+            } else {
+                Append(ch);
+            }
+        }
+
         return LineResult::None;
     }
 
@@ -32,7 +70,18 @@ public:
     std::size_t Length() const { return length_; }
 
 private:
+    bool Append(char ch) {
+        if (length_ == MaxLen) {
+            discarding_ = true;
+            return false;
+        }
+        line_[length_++] = ch;
+        return true;
+    }
+
     char line_[MaxLen + 1] = {};
     std::size_t length_ = 0;
-    // TODO (candidate): any further state you need.
+    bool pending_cr_ = false;
+    bool discarding_ = false;
+    bool reset_on_poll_ = false;
 };
